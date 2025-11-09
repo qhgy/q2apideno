@@ -307,34 +307,9 @@ function switchTab(name) {
   document.getElementById('tab-' + name).classList.add('active');
 }
 
-function baseUrl(){ return document.getElementById('base').value.trim(); }
-function authHeader(){
-  const v = document.getElementById('auth').value.trim();
-  return v ? ('Bearer ' + v) : '';
-}
-function setHealth(text, ok=true) {
-  const el = document.getElementById('health');
-  el.textContent = text;
-  el.style.color = ok ? 'var(--ok)' : 'var(--danger)';
-}
-
 function api(path){
-  const b = baseUrl();
-  const baseClean = b.replace(/\/+$/, '');
-  const p = typeof path === 'string' ? path : '';
-  const pathClean = ('/' + p.replace(/^\/+/, '')).replace(/\/{2,}/g, '/');
-  return (baseClean ? baseClean : '') + pathClean;
-}
-
-async function ping(){
-  try{
-    const r = await fetch(api('/healthz'));
-    const j = await r.json();
-    if (j && j.status === 'ok') setHealth('Healthy', true);
-    else setHealth('Unhealthy', false);
-  } catch(e){
-    setHealth('Error', false);
-  }
+  const pathClean = ('/' + (path || '').replace(/^\/+/, '')).replace(/\/{2,}/g, '/');
+  return pathClean;
 }
 
 function renderAccounts(list){
@@ -619,7 +594,6 @@ async function send() {
 
 window.addEventListener('DOMContentLoaded', () => {
   loadAccounts();
-  ping();
 });
 </script>
 </body>
