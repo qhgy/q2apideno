@@ -5,11 +5,12 @@ import {
   Account, 
   AccountCreate, 
   AccountUpdate, 
-  ClaudeRequest
+  ClaudeRequest,
+  ChatCompletionRequest
 } from "./types.ts";
 import * as db from "./db.ts";
 import * as auth from "./auth.ts";
-import { convertClaudeToAmazonQRequest } from "./converter.ts";
+import { convertClaudeToAmazonQRequest, convertOpenAIRequestToAmazonQ } from "./converter.ts";
 import { sendChatRequest } from "./amazon_q.ts";
 import { ClaudeStreamHandler } from "./stream_handler.ts";
 
@@ -345,8 +346,130 @@ app.post("/v1/messages", async (c) => {
     }
 });
 
-app.post("/v1/chat/completions", (c) => {
-   return c.json({ error: "Not implemented in this Deno port yet. Use /v1/messages." }, 501);
+app.post("/v1/chat/completions", async (c) => {
+    const req = await c.req.json<ChatCompletionRequest>();
+    const authHeader = c.req.header("Authorization");
+    const bearer = extractBearer(authHeader);
+
+    let account: Account;
+    try {
+        account = await resolveAccountForKey(bearer);
+    } catch (e: any) {
+        return c.json({ error: e.message }, 401);
+    }
+
+    const aqRequest = convertOpenAIRequestToAmazonQ(req);
+    const doStream = req.stream === true;
+    const model = req.model || "unknown";
+    const created = Math.floor(Date.now() / 1000);
+    const id = `chatcmpl-${crypto.randomUUID()}`;
+
+    async function getStream(acc: Account) {
+        let access = acc.accessToken;
+        if (!access) {
+            const refreshed = await refreshAccessTokenInDb(acc.id);
+            access = refreshed.accessToken;
+        }
+        if (!access) throw new Error("Access token missing");
+        
+        return await sendChatRequest(access, aqRequest);
+    }
+
+    try {
+        const result = await getStream(account);
+
+        if (doStream) {
+            const stream = new ReadableStream({
+                async start(controller) {
+                    const encoder = new TextEncoder();
+                    const sendSSE = (data: any) => {
+                        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+                    };
+
+                    try {
+                        // Initial chunk
+                        sendSSE({
+                            id, object: "chat.completion.chunk", created, model,
+                            choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]
+                        });
+
+                        for await (const [eventType, payload] of result.eventStream) {
+                            // We need to extract text from Amazon Q events
+                            // Similar to Python's _extract_text_from_event
+                            let text = "";
+                            if (payload.assistantResponseEvent?.content) text = payload.assistantResponseEvent.content;
+                            else if (payload.assistantMessage?.content) text = payload.assistantMessage.content;
+                            else if (payload.message?.content) text = payload.message.content;
+                            else if (payload.delta?.content) text = payload.delta.content;
+                            // Also check for 'chunk' or other fields if needed, but usually it's one of these for text
+                            
+                            if (text) {
+                                sendSSE({
+                                    id, object: "chat.completion.chunk", created, model,
+                                    choices: [{ index: 0, delta: { content: text }, finish_reason: null }]
+                                });
+                            }
+                        }
+
+                        // Finish chunk
+                        sendSSE({
+                            id, object: "chat.completion.chunk", created, model,
+                            choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+                        });
+                        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+
+                        await db.updateAccountStats(account.id, true, MAX_ERROR_COUNT);
+                    } catch (e) {
+                        await db.updateAccountStats(account.id, false, MAX_ERROR_COUNT);
+                        console.error("Stream error:", e);
+                        // Try to send error in stream if possible, or just close
+                        const errObj = { error: { message: String(e), type: "server_error" } };
+                         controller.enqueue(encoder.encode(`data: ${JSON.stringify(errObj)}\n\n`));
+                    } finally {
+                        controller.close();
+                    }
+                }
+            });
+
+            return new Response(stream, {
+                headers: {
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive"
+                }
+            });
+        } else {
+            // Non-streaming: accumulate
+            const chunks: string[] = [];
+            for await (const [_, payload] of result.eventStream) {
+                let text = "";
+                if (payload.assistantResponseEvent?.content) text = payload.assistantResponseEvent.content;
+                else if (payload.assistantMessage?.content) text = payload.assistantMessage.content;
+                else if (payload.message?.content) text = payload.message.content;
+                else if (payload.delta?.content) text = payload.delta.content;
+                if (text) chunks.push(text);
+            }
+            const fullText = chunks.join("");
+            await db.updateAccountStats(account.id, true, MAX_ERROR_COUNT);
+
+            return c.json({
+                id,
+                object: "chat.completion",
+                created,
+                model,
+                choices: [{
+                    index: 0,
+                    message: { role: "assistant", content: fullText },
+                    finish_reason: "stop"
+                }],
+                usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+            });
+        }
+
+    } catch (e: any) {
+        await db.updateAccountStats(account.id, false, MAX_ERROR_COUNT);
+        return c.json({ error: e.message }, 502);
+    }
 });
 
 Deno.serve(app.fetch);
