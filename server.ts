@@ -29,6 +29,48 @@ const CONSOLE_ENABLED = (Deno.env.get("ENABLE_CONSOLE") || "true").toLowerCase()
 
 // --- Helpers ---
 
+/**
+ * 对敏感信息进行脱敏处理
+ * @param account 账户信息
+ * @returns 脱敏后的账户信息
+ */
+function sanitizeAccount(account: Account): Omit<Account, 'clientSecret' | 'refreshToken' | 'accessToken'> & {
+  clientSecret: string;
+  refreshToken?: string;
+  accessToken?: string;
+} {
+  const sanitized = { ...account };
+  
+  // 对 clientSecret 进行脱敏，只显示前8位和后4位
+  if (sanitized.clientSecret) {
+    if (sanitized.clientSecret.length > 12) {
+      sanitized.clientSecret = sanitized.clientSecret.substring(0, 8) + '***' + sanitized.clientSecret.substring(sanitized.clientSecret.length - 4);
+    } else {
+      sanitized.clientSecret = '***';
+    }
+  }
+  
+  // 对 refreshToken 进行脱敏，只显示前8位和后4位
+  if (sanitized.refreshToken) {
+    if (sanitized.refreshToken.length > 12) {
+      sanitized.refreshToken = sanitized.refreshToken.substring(0, 8) + '***' + sanitized.refreshToken.substring(sanitized.refreshToken.length - 4);
+    } else {
+      sanitized.refreshToken = '***';
+    }
+  }
+  
+  // 对 accessToken 进行脱敏，只显示前8位和后4位
+  if (sanitized.accessToken) {
+    if (sanitized.accessToken.length > 12) {
+      sanitized.accessToken = sanitized.accessToken.substring(0, 8) + '***' + sanitized.accessToken.substring(sanitized.accessToken.length - 4);
+    } else {
+      sanitized.accessToken = '***';
+    }
+  }
+  
+  return sanitized;
+}
+
 function extractTextFromEvent(payload: any): string {
   if (!payload || typeof payload !== 'object') return "";
   
@@ -171,20 +213,21 @@ app.get("/", serveStatic({ path: "./frontend/index.html" }));
 if (CONSOLE_ENABLED) {
   app.get("/v2/accounts", async (c) => {
     const accounts = await db.listAccounts();
-    return c.json(accounts);
+    const sanitizedAccounts = accounts.map(sanitizeAccount);
+    return c.json(sanitizedAccounts);
   });
 
   app.post("/v2/accounts", async (c) => {
     const body = await c.req.json<AccountCreate>();
     const acc = await db.createAccount(body);
-    return c.json(acc);
+    return c.json(sanitizeAccount(acc));
   });
 
   app.get("/v2/accounts/:id", async (c) => {
     const id = c.req.param("id");
     const acc = await db.getAccount(id);
     if (!acc) return c.json({ error: "Not found" }, 404);
-    return c.json(acc);
+    return c.json(sanitizeAccount(acc));
   });
 
   app.delete("/v2/accounts/:id", async (c) => {
@@ -206,7 +249,7 @@ if (CONSOLE_ENABLED) {
     const id = c.req.param("id");
     try {
       const acc = await refreshAccessTokenInDb(id);
-      return c.json(acc);
+      return c.json(sanitizeAccount(acc));
     } catch (e: any) {
       return c.json({ error: e.message }, 502);
     }
@@ -307,7 +350,7 @@ if (CONSOLE_ENABLED) {
           
           return c.json({
               status: "completed",
-              account: acc
+              account: sanitizeAccount(acc)
           });
       } catch (e: any) {
           if (e.message.includes("timeout")) {
